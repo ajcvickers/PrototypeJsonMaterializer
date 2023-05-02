@@ -2,60 +2,52 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using Microsoft.EntityFrameworkCore.Storage;
 using NetTopologySuite.Geometries;
 using NetTopologySuite.IO;
 using Newtonsoft.Json;
 
 namespace PrototypeJsonMaterializer;
 
-public abstract class JsonValueReader<TValue>
+public interface IJsonValueReader<out TValue>
 {
-    public abstract TValue FromJson(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader);
+    TValue FromJson(ref Utf8JsonReaderManager manager);
 }
 
-public abstract class SimpleJsonValueReader<TValue> : JsonValueReader<TValue>
+public sealed class IpAddressJsonValueReader : IJsonValueReader<IPAddress?>
 {
-    public override TValue FromJson(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
-        => FromJson(ref reader);
-
-    public abstract TValue FromJson(ref Utf8JsonReader reader);
+    public IPAddress FromJson(ref Utf8JsonReaderManager manager)
+        => IPAddress.Parse(manager.CurrentReader.GetString()!);
 }
 
-public class IPAddressJsonValueReader : SimpleJsonValueReader<IPAddress?>
+public sealed class DateOnlyJsonValueReader : IJsonValueReader<DateOnly>
 {
-    public override IPAddress FromJson(ref Utf8JsonReader reader)
-        => IPAddress.Parse(reader.GetString()!);
+    public DateOnly FromJson(ref Utf8JsonReaderManager manager)
+        => DateOnly.Parse(manager.CurrentReader.GetString()!);
 }
 
-public class DateOnlyJsonValueReader : SimpleJsonValueReader<DateOnly>
+public sealed class PointJsonValueReader : IJsonValueReader<Point>
 {
-    public override DateOnly FromJson(ref Utf8JsonReader reader)
-        => DateOnly.Parse(reader.GetString()!);
+    public Point FromJson(ref Utf8JsonReaderManager manager)
+        => (Point)new WKTReader().Read(manager.CurrentReader.GetString()!);
 }
 
-public class PointJsonValueReader : SimpleJsonValueReader<Point>
+public sealed class GeoJsonPointJsonValueReader3 : IJsonValueReader<Point>
 {
-    public override Point FromJson(ref Utf8JsonReader reader)
-        => (Point)new WKTReader().Read(reader.GetString()!);
-}
-
-public class GeoJsonPointJsonValueReader : JsonValueReader<Point>
-{
-    public override Point FromJson(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
+    public Point FromJson(ref Utf8JsonReaderManager manager)
     {
         string? type = null;
         var coordinates = new List<double>();
         string? tokenName = null;
-        while (JsonColumnsSample.TryReadToken(stream, ref buffer, ref reader, ref tokenName))
+        while (manager.TryReadToken(ref tokenName))
         {
             switch (tokenName!)
             {
                 case "coordinates":
-                    coordinates.Add(JsonColumnsSample.MaterializeDoubleElement(stream, ref buffer, ref reader)!);
+                    manager.AdvanceToFirstElement();
+                    coordinates.Add(manager.CurrentReader.GetDouble());
                     break;
                 case "type":
-                    type = reader.GetString();
+                    type = manager.CurrentReader.GetString();
                     break;
             }
         }
@@ -65,38 +57,35 @@ public class GeoJsonPointJsonValueReader : JsonValueReader<Point>
     }
 }
 
-public class GeoJsonPointJsonValueReader2 : JsonValueReader<Point>
+public sealed class GeoJsonPointJsonValueReader4 : IJsonValueReader<Point>
 {
-    public override Point FromJson(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
+    public Point FromJson(ref Utf8JsonReaderManager manager)
     {
         var builder = new StringBuilder("{");
         var depth = 1;
         while (depth > 0)
         {
-            while (!reader.Read())
-            {
-                JsonColumnsSample.ReadBytes(stream, ref buffer, ref reader);
-            }
+            manager.MoveNext();
 
-            switch (reader.TokenType)
+            switch (manager.CurrentReader.TokenType)
             {
                 case JsonTokenType.EndObject:
                     depth--;
                     builder.Append('}');
                     break;
                 case JsonTokenType.PropertyName:
-                    builder.Append(@$"""{reader.GetString()}"":");
+                    builder.Append(@$"""{manager.CurrentReader.GetString()}"":");
                     break;
                 case JsonTokenType.StartObject:
                     depth++;
                     builder.Append('{');
                     break;
                 case JsonTokenType.String:
-                    builder.Append(@$"""{reader.GetString()}"",");
+                    builder.Append(@$"""{manager.CurrentReader.GetString()}"",");
                     
                     break;
                 case JsonTokenType.Number:
-                    builder.Append(@$"{reader.GetDecimal()},");
+                    builder.Append(@$"{manager.CurrentReader.GetDecimal()},");
                     break;
                 case JsonTokenType.True:
                     builder.Append("true,");
@@ -122,22 +111,5 @@ public class GeoJsonPointJsonValueReader2 : JsonValueReader<Point>
         {
             return (Point)serializer.Deserialize<Geometry>(jsonReader);
         }
-    }
-}
-
-// Extensions:
-
-public static class TempExtensions
-{
-    public static object? GetJsonValueReader(this CoreTypeMapping typeMapping)
-    {
-        return typeMapping.ClrType.Name switch
-        {
-            nameof(IPAddress) => new IPAddressJsonValueReader(),
-            nameof(DateOnly) => new DateOnlyJsonValueReader(),
-            nameof(Geometry) => new PointJsonValueReader(),
-            nameof(Point) => new GeoJsonPointJsonValueReader2(),
-            _ => null
-        };
     }
 }

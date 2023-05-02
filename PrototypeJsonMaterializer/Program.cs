@@ -75,16 +75,30 @@ public static class JsonColumnsSample
     }
   ]
 }";
+
+        // Stream/dynamic
+        
         using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
-        var buffer = new byte[1];
-
-        var materializer = CreateJsonMaterializer<PostMetadata>(
+        var materializer = CreateJsonStreamMaterializer<PostMetadata>(
             context.Model.FindEntityType("PrototypeJsonMaterializer.PostMetadata")!);
-        var entity = materializer(stream, buffer);
+        var entity = materializer(stream);
 
-        // var reader = new Utf8JsonReader(buffer.AsSpan(0), isFinalBlock: false, state: default);
-        // ReadBytes(stream, ref buffer, ref reader);
-        // var entity = MaterializePostMetadata(stream, ref buffer, ref reader);
+        // Buffer/dynamic
+        
+        // var materializer = CreateJsonBufferMaterializer<PostMetadata>(
+        //     context.Model.FindEntityType("PrototypeJsonMaterializer.PostMetadata")!);
+        // var entity = materializer(Encoding.UTF8.GetBytes(json));
+
+        // Stream/static
+        
+        // using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
+        // var readerManager = new Utf8JsonReaderManager(stream);
+        // var entity = MaterializePostMetadata(ref readerManager);
+
+        // Buffer/static
+        
+        // var readerManager = new Utf8JsonReaderManager(Encoding.UTF8.GetBytes(json));
+        // var entity = MaterializePostMetadata(ref readerManager);
 
         Console.WriteLine($"{entity.GetType()}:");
         Console.WriteLine($"  Views: {entity.Views}");
@@ -99,6 +113,7 @@ public static class JsonColumnsSample
             Console.WriteLine($"      GeoLocation: {geography.GeoJsonLocation}");
             Console.WriteLine($"      Browsers: {string.Join(", ", geography.Browsers)}");
         }
+
         Console.WriteLine($"  TopSearches:");
         for (var i = 0; i < entity.TopSearches.Count; i++)
         {
@@ -107,6 +122,7 @@ public static class JsonColumnsSample
             Console.WriteLine($"      Term: {searchTerm.Term}");
             Console.WriteLine($"      Count: {searchTerm.Count}");
         }
+
         Console.WriteLine($"  Updates:");
         for (var i = 0; i < entity.Updates.Count; i++)
         {
@@ -127,12 +143,10 @@ public static class JsonColumnsSample
     }
 
     // Expression-based materializer:
-    
-    private static readonly MethodInfo ReadBytesMethod = typeof(JsonColumnsSample).GetMethod(nameof(ReadBytes))!;
-    private static readonly MethodInfo TryReadTokenMethod = typeof(JsonColumnsSample).GetMethod(nameof(TryReadToken))!;
-    private static readonly MethodInfo AdvanceToFirstElementMethod = typeof(JsonColumnsSample).GetMethod(nameof(AdvanceToFirstElement))!;
-    private static readonly ConstructorInfo ReadOnlySpanConstructor = typeof(ReadOnlySpan<byte>).GetConstructors()
-        .Single(c => c.GetParameters().Length == 1 && c.GetParameters()[0].ParameterType == typeof(byte[]));
+
+    private static readonly MethodInfo TryReadTokenMethod = typeof(Utf8JsonReaderManager).GetMethod(nameof(Utf8JsonReaderManager.TryReadToken))!;
+    private static readonly MethodInfo AdvanceToFirstElementMethod = typeof(Utf8JsonReaderManager).GetMethod(nameof(Utf8JsonReaderManager.AdvanceToFirstElement))!;
+    private static readonly FieldInfo CurrentReaderField = typeof(Utf8JsonReaderManager).GetField(nameof(Utf8JsonReaderManager.CurrentReader))!;
 
     private static readonly Dictionary<Type, MethodInfo> PrimitiveMethods
         = new()
@@ -142,33 +156,40 @@ public static class JsonColumnsSample
             { typeof(double), typeof(Utf8JsonReader).GetMethod(nameof(Utf8JsonReader.GetDouble))! },
         };
 
-    public static Func<Stream, byte[], TEntity> CreateJsonMaterializer<TEntity>(IEntityType entityType)
+    public static Func<byte[], TEntity> CreateJsonBufferMaterializer<TEntity>(IEntityType entityType)
     {
-        var streamParameter = Expression.Parameter(typeof(Stream), "stream");
         var bufferParameter = Expression.Parameter(typeof(byte[]), "buffer");
-        var readerVariable = Expression.Variable(typeof(Utf8JsonReader), "reader");
+        var managerVariable = Expression.Variable(typeof(Utf8JsonReaderManager), "manager");
 
         var topBlock = Expression.Block(
-            new[] { readerVariable },
+            new[] { managerVariable },
             Expression.Assign(
-                readerVariable, Expression.New(
-                    typeof(Utf8JsonReader).GetConstructor(new[] { typeof(ReadOnlySpan<byte>), typeof(bool), typeof(JsonReaderState) })!,
-                    Expression.New(ReadOnlySpanConstructor, bufferParameter),
-                    Expression.Constant(false),
-                    Expression.Constant(default(JsonReaderState)))),
-            Expression.Call(ReadBytesMethod, streamParameter, bufferParameter, readerVariable),
-            CreateMaterializeBlock(streamParameter, bufferParameter, readerVariable, entityType));
+                managerVariable, Expression.New(
+                    typeof(Utf8JsonReaderManager).GetConstructor(new[] { typeof(byte[]) })!,
+                    bufferParameter)),
+            CreateMaterializeBlock(managerVariable, entityType));
 
-        var materializeLambda = Expression.Lambda<Func<Stream, byte[], TEntity>>(
-            topBlock, streamParameter, bufferParameter);
-
-        return materializeLambda.Compile();
+        return Expression.Lambda<Func<byte[], TEntity>>(topBlock, bufferParameter).Compile();
     }
 
+    public static Func<Stream, TEntity> CreateJsonStreamMaterializer<TEntity>(IEntityType entityType)
+    {
+        var streamParameter = Expression.Parameter(typeof(Stream), "stream");
+        var managerVariable = Expression.Variable(typeof(Utf8JsonReaderManager), "manager");
+    
+        var topBlock = Expression.Block(
+            new[] { managerVariable },
+            Expression.Assign(
+                managerVariable, Expression.New(
+                    typeof(Utf8JsonReaderManager).GetConstructor(new[] { typeof(Stream) })!,
+                    streamParameter)),
+            CreateMaterializeBlock(managerVariable, entityType));
+
+        return Expression.Lambda<Func<Stream, TEntity>>(topBlock, streamParameter).Compile();
+    }
+    
     private static BlockExpression CreateMaterializeBlock(
-        ParameterExpression streamParameter,
-        ParameterExpression bufferParameter,
-        ParameterExpression readerVariable,
+        ParameterExpression managerParameter,
         IEntityType entityType)
     {
         var clrType = entityType.ClrType;
@@ -186,13 +207,15 @@ public static class JsonColumnsSample
                 var jsonValueReader = typeMapping.ElementTypeMapping.GetJsonValueReader();
 
                 var readerExpression = Expression.Block(
-                    Expression.Call(AdvanceToFirstElementMethod, streamParameter, bufferParameter, readerVariable),
+                    Expression.Call(managerParameter, AdvanceToFirstElementMethod),
                     jsonValueReader == null
-                        ? Expression.Call(readerVariable, PrimitiveMethods[typeMapping.ElementTypeMapping.ClrType])
+                        ? Expression.Call(
+                            Expression.Field(managerParameter, CurrentReaderField),
+                            PrimitiveMethods[typeMapping.ElementTypeMapping.ClrType])
                         : Expression.Call(
                             Expression.Constant(jsonValueReader),
-                            jsonValueReader.GetType().GetMethods().Single(m => m.Name == "FromJson" && m.GetParameters().Length == 3),
-                            streamParameter, bufferParameter, readerVariable));
+                            jsonValueReader.GetType().GetMethod("FromJson")!,
+                            managerParameter));
 
                 propertyCases.Add(
                     Expression.SwitchCase(
@@ -213,12 +236,13 @@ public static class JsonColumnsSample
                             Expression.Assign(
                                 Expression.MakeMemberAccess(entityVariable, clrType.GetProperty(property.Name)!),
                                 jsonValueReader == null
-                                    ? Expression.Call(readerVariable, PrimitiveMethods[typeMapping.ClrType])
+                                    ? Expression.Call(
+                                        Expression.Field(managerParameter, CurrentReaderField),
+                                        PrimitiveMethods[typeMapping.ClrType])
                                     : Expression.Call(
                                         Expression.Constant(jsonValueReader),
-                                        jsonValueReader.GetType().GetMethods()
-                                            .Single(m => m.Name == "FromJson" && m.GetParameters().Length == 3),
-                                        streamParameter, bufferParameter, readerVariable)),
+                                        jsonValueReader.GetType().GetMethod("FromJson")!,
+                                        managerParameter)),
                             Expression.Empty()),
                         Expression.Constant(property.GetJsonPropertyName())));
             }
@@ -232,7 +256,7 @@ public static class JsonColumnsSample
                         Expression.Call(
                             Expression.MakeMemberAccess(entityVariable, clrType.GetProperty(navigation.Name)!),
                             navigation.ClrType.GetMethod("Add")!,
-                            CreateMaterializeBlock(streamParameter, bufferParameter, readerVariable, navigation.TargetEntityType)),
+                            CreateMaterializeBlock(managerParameter, navigation.TargetEntityType)),
                         Expression.Empty()),
                     Expression.Constant(navigation.Name)));
         }
@@ -243,99 +267,38 @@ public static class JsonColumnsSample
             Expression.Assign(tokenNameVariable, Expression.Constant(null, typeof(string))),
             Expression.Loop(
                 Expression.IfThenElse(
-                    Expression.Call(TryReadTokenMethod, streamParameter, bufferParameter, readerVariable, tokenNameVariable),
-                    Expression.Block(
-                        Expression.Switch(tokenNameVariable, null, null, propertyCases)),
+                    Expression.Call(managerParameter, TryReadTokenMethod, tokenNameVariable),
+                    Expression.Block(Expression.Switch(tokenNameVariable, null, null, propertyCases)),
                     Expression.Break(readDoneLabel)),
                 readDoneLabel),
             entityVariable);
     }
 
-    // Helpers:
-    
-    public static void AdvanceToFirstElement(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
-    {
-        if (reader.TokenType == JsonTokenType.PropertyName)
-        {
-            string? _ = null;
-            TryReadToken(stream, ref buffer, ref reader, ref _);
-        }
-    }
+    // Static materializer with manager: 
 
-    public static bool TryReadToken(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader, ref string? tokenName)
-    {
-        while (true)
-        {
-            while (!reader.Read())
-            {
-                ReadBytes(stream, ref buffer, ref reader);
-            }
-
-            switch (reader.TokenType)
-            {
-                case JsonTokenType.EndObject:
-                    return false;
-                case JsonTokenType.PropertyName:
-                    tokenName = reader.GetString();
-                    break;
-                case JsonTokenType.StartObject:
-                case JsonTokenType.String:
-                case JsonTokenType.Number:
-                case JsonTokenType.True:
-                case JsonTokenType.False:
-                case JsonTokenType.Null:
-                    return true;
-            }
-        }
-    }
-
-    public static void ReadBytes(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
-    {
-        int bytesAvailable;
-        if (reader.TokenType != JsonTokenType.None && reader.BytesConsumed < buffer.Length)
-        {
-            var leftover = buffer.AsSpan((int)reader.BytesConsumed);
-
-            if (leftover.Length == buffer.Length)
-            {
-                Array.Resize(ref buffer, buffer.Length * 2);
-            }
-
-            leftover.CopyTo(buffer);
-            bytesAvailable = stream.Read(buffer.AsSpan(leftover.Length)) + leftover.Length;
-        }
-        else
-        {
-            bytesAvailable = stream.Read(buffer);
-        }
-
-        reader = new Utf8JsonReader(buffer.AsSpan(0, bytesAvailable), isFinalBlock : bytesAvailable != buffer.Length, reader.CurrentState);
-    }
-
-    // Static materializer: 
-    
-    public static PostMetadata MaterializePostMetadata(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
+    public static PostMetadata MaterializePostMetadata(ref Utf8JsonReaderManager manager)
     {
         var entity = new PostMetadata();
         string? tokenName = null;
-        while (TryReadToken(stream, ref buffer, ref reader, ref tokenName))
+        while (manager.TryReadToken(ref tokenName))
         {
             switch (tokenName!)
             {
                 case "Views":
-                    entity.Views = reader.GetInt32();
+                    entity.Views = manager.CurrentReader.GetInt32();
                     break;
                 case "SomeInts":
-                    entity.SomeInts.Add(MaterializeIntElement(stream, ref buffer, ref reader));
+                    manager.AdvanceToFirstElement();
+                    entity.SomeInts.Add(manager.CurrentReader.GetInt32());
                     break;
                 case "TopGeographies":
-                    entity.TopGeographies.Add(MaterializeVisits(stream, ref buffer, ref reader));
+                    entity.TopGeographies.Add(MaterializeVisits(ref manager));
                     break;
                 case "TopSearches":
-                    entity.TopSearches.Add(MaterializeSearchTerm(stream, ref buffer, ref reader));
+                    entity.TopSearches.Add(MaterializeSearchTerm(ref manager));
                     break;
                 case "Updates":
-                    entity.Updates.Add(MaterializePostUpdate(stream, ref buffer, ref reader));
+                    entity.Updates.Add(MaterializePostUpdate(ref manager));
                     break;
             }
         }
@@ -343,48 +306,46 @@ public static class JsonColumnsSample
         return entity;
     }
 
-    private static readonly PointJsonValueReader LocationJsonValueReader = new();
-    private static readonly GeoJsonPointJsonValueReader GeoJsonLocationJsonValueReader = new();
-
-    public static Visits MaterializeVisits(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
+    public static Visits MaterializeVisits(ref Utf8JsonReaderManager manager)
     {
         var entity = new Visits();
         string? tokenName = null;
-        while (TryReadToken(stream, ref buffer, ref reader, ref tokenName))
+        while (manager.TryReadToken(ref tokenName))
         {
             switch (tokenName!)
             {
                 case "Browsers":
-                    entity.Browsers.Add(MaterializeStringElement(stream, ref buffer, ref reader)!);
+                    manager.AdvanceToFirstElement();
+                    entity.Browsers.Add(manager.CurrentReader.GetString()!);
                     break;
                 case "Location":
-                    entity.Location = LocationJsonValueReader.FromJson(stream, ref buffer, ref reader);
+                    entity.Location = LocationJsonValueReader.FromJson(ref manager);
                     break;
                 case "GeoJsonLocation":
-                    entity.GeoJsonLocation = GeoJsonLocationJsonValueReader.FromJson(stream, ref buffer, ref reader);
+                    entity.GeoJsonLocation = GeoJsonLocationJsonValueReader2.FromJson(ref manager);
                     break;
                 case "Count":
-                    entity.Count = reader.GetInt32();
+                    entity.Count = manager.CurrentReader.GetInt32();
                     break;
             }
         }
 
         return entity;
     }
-
-    public static SearchTerm MaterializeSearchTerm(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
+    
+    public static SearchTerm MaterializeSearchTerm(ref Utf8JsonReaderManager manager)
     {
         var entity = new SearchTerm();
         string? tokenName = null;
-        while (TryReadToken(stream, ref buffer, ref reader, ref tokenName))
+        while (manager.TryReadToken(ref tokenName))
         {
             switch (tokenName!)
             {
                 case "Term":
-                    entity.Term = reader.GetString()!;
+                    entity.Term = manager.CurrentReader.GetString()!;
                     break;
                 case "Count":
-                    entity.Count = reader.GetInt32();
+                    entity.Count = manager.CurrentReader.GetInt32();
                     break;
             }
         }
@@ -392,28 +353,45 @@ public static class JsonColumnsSample
         return entity;
     }
 
-    private static readonly IPAddressJsonValueReader PostedFromJsonValueReader = new();
-    private static readonly DateOnlyJsonValueReader UpdatedOnJsonValueReader = new();
-
-    public static PostUpdate MaterializePostUpdate(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
+    public static PostUpdate MaterializePostUpdate(ref Utf8JsonReaderManager manager)
     {
         var entity = new PostUpdate();
         string? tokenName = null;
-        while (TryReadToken(stream, ref buffer, ref reader, ref tokenName))
+        while (manager.TryReadToken(ref tokenName))
         {
             switch (tokenName!)
             {
                 case "PostedFrom":
-                    entity.PostedFrom = PostedFromJsonValueReader.FromJson(stream, ref buffer, ref reader)!;
+                    entity.PostedFrom = PostedFromJsonValueReader.FromJson(ref manager)!;
                     break;
                 case "UpdatedBy":
-                    entity.UpdatedBy = reader.GetString();
+                    entity.UpdatedBy = manager.CurrentReader.GetString();
                     break;
                 case "UpdatedOn":
-                    entity.UpdatedOn = UpdatedOnJsonValueReader.FromJson(stream, ref buffer, ref reader)!;
+                    entity.UpdatedOn = UpdatedOnJsonValueReader.FromJson(ref manager)!;
                     break;
                 case "Commits":
-                    entity.Commits.Add(MaterializeCommit(stream, ref buffer, ref reader));
+                    entity.Commits.Add(MaterializeCommit(ref manager));
+                    break;
+            }
+        }
+
+        return entity;
+    }
+
+    public static Commit MaterializeCommit(ref Utf8JsonReaderManager manager)
+    {
+        var entity = new Commit();
+        string? tokenName = null;
+        while (manager.TryReadToken(ref tokenName))
+        {
+            switch (tokenName!)
+            {
+                case "Comment":
+                    entity.Comment = manager.CurrentReader.GetString()!;
+                    break;
+                case "CommittedOn":
+                    entity.CommittedOn = CommittedOnJsonValueReader.FromJson(ref manager);
                     break;
             }
         }
@@ -422,42 +400,9 @@ public static class JsonColumnsSample
     }
 
     private static readonly DateOnlyJsonValueReader CommittedOnJsonValueReader = new();
-
-    public static Commit MaterializeCommit(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
-    {
-        var entity = new Commit();
-        string? tokenName = null;
-        while (TryReadToken(stream, ref buffer, ref reader, ref tokenName))
-        {
-            switch (tokenName!)
-            {
-                case "Comment":
-                    entity.Comment = reader.GetString()!;
-                    break;
-                case "CommittedOn":
-                    entity.CommittedOn = CommittedOnJsonValueReader.FromJson(stream, ref buffer, ref reader);
-                    break;
-            }
-        }
-
-        return entity;
-    }
-
-    public static int MaterializeIntElement(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
-    {
-        AdvanceToFirstElement(stream, ref buffer, ref reader);
-        return reader.GetInt32();
-    }
-
-    public static string? MaterializeStringElement(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
-    {
-        AdvanceToFirstElement(stream, ref buffer, ref reader);
-        return reader.GetString();
-    }
-
-    public static double MaterializeDoubleElement(Stream stream, ref byte[] buffer, ref Utf8JsonReader reader)
-    {
-        AdvanceToFirstElement(stream, ref buffer, ref reader);
-        return reader.GetDouble();
-    }
+    private static readonly IpAddressJsonValueReader PostedFromJsonValueReader = new();
+    private static readonly DateOnlyJsonValueReader UpdatedOnJsonValueReader = new();
+    private static readonly PointJsonValueReader LocationJsonValueReader = new();
+    private static readonly GeoJsonPointJsonValueReader4 GeoJsonLocationJsonValueReader2 = new();
 }
+    
