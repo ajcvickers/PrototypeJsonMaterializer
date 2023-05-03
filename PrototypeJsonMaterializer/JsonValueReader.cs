@@ -82,7 +82,6 @@ public sealed class GeoJsonPointJsonValueReader4 : IJsonValueReader<Point>
                     break;
                 case JsonTokenType.String:
                     builder.Append(@$"""{manager.CurrentReader.GetString()}"",");
-                    
                     break;
                 case JsonTokenType.Number:
                     builder.Append(@$"{manager.CurrentReader.GetDecimal()},");

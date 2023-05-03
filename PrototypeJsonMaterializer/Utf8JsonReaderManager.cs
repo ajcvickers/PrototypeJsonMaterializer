@@ -4,30 +4,22 @@ namespace PrototypeJsonMaterializer;
 
 public ref struct Utf8JsonReaderManager
 {
-    private readonly Stream? _stream;
-    private byte[] _buffer;
+    public readonly JsonReaderData Data;
     public Utf8JsonReader CurrentReader;
 
-    public Utf8JsonReaderManager(byte[] buffer)
+    public Utf8JsonReaderManager(JsonReaderData data)
     {
-        _buffer = buffer;
-        CurrentReader = new Utf8JsonReader(buffer.AsSpan(0), isFinalBlock: true, state: default);
-        ReadBytes();
-    }
-
-    public Utf8JsonReaderManager(Stream stream)
-    {
-        _stream = stream;
-        _buffer = new byte[1];
-        CurrentReader = new Utf8JsonReader(_buffer.AsSpan(0), isFinalBlock: false, state: default);
-        ReadBytes();
+        Data = data;
+        CurrentReader = data.CreateReader();
     }
 
     public void MoveNext()
     {
         while (!CurrentReader.Read())
         {
-            ReadBytes();
+            Data.ReadBytes((int)CurrentReader.BytesConsumed);
+            Data.ReaderState = CurrentReader.CurrentState;
+            CurrentReader = Data.CreateReader();
         }
     }
 
@@ -62,34 +54,5 @@ public ref struct Utf8JsonReaderManager
             string? _ = null;
             TryReadToken(ref _);
         }
-    }
-    
-    private void ReadBytes()
-    {
-        if (_stream == null)
-        {
-            return;
-        }
-
-        int bytesAvailable;
-        if (CurrentReader.TokenType != JsonTokenType.None && CurrentReader.BytesConsumed < _buffer.Length)
-        {
-            var leftover = _buffer.AsSpan((int)CurrentReader.BytesConsumed);
-
-            if (leftover.Length == _buffer.Length)
-            {
-                Array.Resize(ref _buffer, _buffer.Length * 2);
-            }
-
-            leftover.CopyTo(_buffer);
-            bytesAvailable = _stream.Read(_buffer.AsSpan(leftover.Length)) + leftover.Length;
-        }
-        else
-        {
-            bytesAvailable = _stream.Read(_buffer);
-        }
-
-        CurrentReader = new Utf8JsonReader(_buffer.AsSpan(0, bytesAvailable), isFinalBlock: bytesAvailable != _buffer.Length,
-            CurrentReader.CurrentState);
     }
 }
