@@ -1,9 +1,4 @@
-﻿using System.Linq.Expressions;
-using System.Reflection;
-using System.Text;
-using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Metadata;
+﻿using System.Text;
 
 namespace PrototypeJsonMaterializer;
 
@@ -30,7 +25,26 @@ public static class JsonColumnsSample
                   "Longitude": 35.2431
                 }
               ],
+                  "UnknownObject": {
+                    "type": "Point",
+                    "coordinates": [133.793,47.2431]
+                  },
+              "Contact": {
+                  "Address": {
+                      "Street": "11 Meadow Drive",
+                      "City": "Healing",
+                      "Postcode": "DN37 7RU",
+                      "Country": "UK"
+                  },
+                  "Phone": "(555) 555-5555"
+              },
               "TopSearches": [
+                {
+                  "Count": 9647,
+                  "Term": "Search #1"
+                }
+              ],
+              "UnknownArray": [
                 {
                   "Count": 9647,
                   "Term": "Search #1"
@@ -79,30 +93,36 @@ public static class JsonColumnsSample
             """;
 
         // Stream/dynamic
-        
-        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
-        var materializer = CreateJsonMaterializer<PostMetadata>(
-            context.Model.FindEntityType("PrototypeJsonMaterializer.PostMetadata")!);
-        var entity = materializer(new JsonReaderData(stream));
+
+        // using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
+        // var materializer = JsonToEntityMaterializer.CreateJsonMaterializer<PostMetadata>(
+        //     context.Model.FindEntityType("PrototypeJsonMaterializer.PostMetadata")!);
+        // var entity = materializer(new JsonReaderData(stream));
 
         // Buffer/dynamic
-        
-        // var materializer = CreateJsonMaterializer<PostMetadata>(
-        //     context.Model.FindEntityType("PrototypeJsonMaterializer.PostMetadata")!);
-        // var entity = materializer(new JsonReaderData(Encoding.UTF8.GetBytes(json)));
+
+        var materializer = JsonToEntityMaterializer.CreateJsonMaterializer<PostMetadata>(
+            context.Model.FindEntityType("PrototypeJsonMaterializer.PostMetadata")!).Compile();
+        var entity = materializer(new JsonReaderData(Encoding.UTF8.GetBytes(json)));
 
         // Stream/static
-        
+
         // using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
-        // var entity = MaterializePostMetadata(new JsonReaderData(stream));
+        // var entity = PostMetadataMaterializer.MaterializePostMetadata(new JsonReaderData(stream));
 
         // Buffer/static
-        
-        // var entity = MaterializePostMetadata(new JsonReaderData(Encoding.UTF8.GetBytes(json)));
+
+        // var entity = PostMetadataMaterializer.MaterializePostMetadata(new JsonReaderData(Encoding.UTF8.GetBytes(json)));
 
         Console.WriteLine($"{entity.GetType()}:");
         Console.WriteLine($"  Views: {entity.Views}");
         Console.WriteLine($"  SomeInts: {string.Join(", ", entity.SomeInts)}");
+        Console.WriteLine($"  Contact:");
+        Console.WriteLine($"      Street: {entity.Contact?.Address.Street}");
+        Console.WriteLine($"      City: {entity.Contact?.Address.City}");
+        Console.WriteLine($"      Postcode: {entity.Contact?.Address.Postcode}");
+        Console.WriteLine($"      Country: {entity.Contact?.Address.Country}");
+        Console.WriteLine($"      Phone: {entity.Contact?.Phone}");
         Console.WriteLine($"  TopGeographies:");
         for (var i = 0; i < entity.TopGeographies.Count; i++)
         {
@@ -141,290 +161,4 @@ public static class JsonColumnsSample
             }
         }
     }
-
-    // Expression-based materializer:
-
-    private static readonly MethodInfo TryReadTokenMethod = typeof(Utf8JsonReaderManager).GetMethod(nameof(Utf8JsonReaderManager.TryReadToken))!;
-    private static readonly MethodInfo AdvanceToFirstElementMethod = typeof(Utf8JsonReaderManager).GetMethod(nameof(Utf8JsonReaderManager.AdvanceToFirstElement))!;
-    private static readonly FieldInfo CurrentReaderField = typeof(Utf8JsonReaderManager).GetField(nameof(Utf8JsonReaderManager.CurrentReader))!;
-
-    private static readonly Dictionary<Type, MethodInfo> PrimitiveMethods
-        = new()
-        {
-            { typeof(int), typeof(Utf8JsonReader).GetMethod(nameof(Utf8JsonReader.GetInt32))! },
-            { typeof(string), typeof(Utf8JsonReader).GetMethod(nameof(Utf8JsonReader.GetString))! },
-            { typeof(double), typeof(Utf8JsonReader).GetMethod(nameof(Utf8JsonReader.GetDouble))! },
-        };
-
-    private static readonly Dictionary<IEntityType, Delegate> JsonToEntityMaterializers = new();
-
-    public static Func<JsonReaderData, TEntity> CreateJsonMaterializer<TEntity>(IEntityType entityType) 
-        => (Func<JsonReaderData, TEntity>)GetOrCreateMaterializer(entityType);
-
-    private static Delegate GetOrCreateMaterializer(IEntityType entityType)
-    {
-        if (JsonToEntityMaterializers.TryGetValue(entityType, out var materializer))
-        {
-            return materializer;
-        }
-
-        var dataParameter = Expression.Parameter(typeof(JsonReaderData), "data");
-        var clrType = entityType.ClrType;
-        var entityVariable = Expression.Variable(clrType, "entity");
-        var tokenNameVariable = Expression.Variable(typeof(string), "tokenName");
-        var readDoneLabel = Expression.Label("readDone");
-        var managerVariable = Expression.Variable(typeof(Utf8JsonReaderManager), "manager");
-
-        var propertyCases = new List<SwitchCase>();
-
-        foreach (var property in entityType.GetProperties().Where(p => !p.IsShadowProperty()))
-        {
-            var typeMapping = property.GetTypeMapping();
-            if (typeMapping.ElementTypeMapping != null)
-            {
-                var jsonValueReader = typeMapping.ElementTypeMapping.GetJsonValueReader();
-
-                var readerExpression = Expression.Block(
-                    Expression.Call(managerVariable, AdvanceToFirstElementMethod),
-                    jsonValueReader == null
-                        ? Expression.Call(
-                            Expression.Field(managerVariable, CurrentReaderField),
-                            PrimitiveMethods[typeMapping.ElementTypeMapping.ClrType])
-                        : Expression.Call(
-                            Expression.Constant(jsonValueReader),
-                            jsonValueReader.GetType().GetMethod("FromJson")!,
-                            managerVariable));
-
-                propertyCases.Add(
-                    Expression.SwitchCase(
-                        Expression.Block(
-                            Expression.Call(
-                                Expression.MakeMemberAccess(entityVariable, clrType.GetProperty(property.Name)!),
-                                property.ClrType.GetMethod("Add")!,
-                                readerExpression),
-                            Expression.Empty()),
-                        Expression.Constant(property.GetJsonPropertyName())));
-            }
-            else
-            {
-                var jsonValueReader = typeMapping.GetJsonValueReader();
-                propertyCases.Add(
-                    Expression.SwitchCase(
-                        Expression.Block(
-                            Expression.Assign(
-                                Expression.MakeMemberAccess(entityVariable, clrType.GetProperty(property.Name)!),
-                                jsonValueReader == null
-                                    ? Expression.Call(
-                                        Expression.Field(managerVariable, CurrentReaderField),
-                                        PrimitiveMethods[typeMapping.ClrType])
-                                    : Expression.Call(
-                                        Expression.Constant(jsonValueReader),
-                                        jsonValueReader.GetType().GetMethod("FromJson")!,
-                                        managerVariable)),
-                            Expression.Empty()),
-                        Expression.Constant(property.GetJsonPropertyName())));
-            }
-        }
-
-        foreach (var navigation in entityType.GetNavigations().Where(n => !n.IsOnDependent))
-        {
-            propertyCases.Add(
-                Expression.SwitchCase(
-                    Expression.Block(
-                        Expression.Call(
-                            dataParameter,
-                            typeof(JsonReaderData).GetMethod(nameof(JsonReaderData.CaptureState))!,
-                            managerVariable),
-                        Expression.Call(
-                            Expression.MakeMemberAccess(entityVariable, clrType.GetProperty(navigation.Name)!),
-                            navigation.ClrType.GetMethod("Add")!,
-                            Expression.Invoke(Expression.Constant(
-                                GetOrCreateMaterializer(navigation.TargetEntityType),
-                                typeof(Func<,>).MakeGenericType(typeof(JsonReaderData), navigation.TargetEntityType.ClrType)),
-                                dataParameter)),
-                        Expression.Assign(managerVariable,
-                            Expression.New(
-                                typeof(Utf8JsonReaderManager).GetConstructor(new[] { typeof(JsonReaderData) })!,
-                                dataParameter)),
-                        Expression.Empty()),
-                    Expression.Constant(navigation.Name)));
-        }
-
-        materializer = Expression.Lambda(
-            typeof(Func<,>).MakeGenericType(typeof(JsonReaderData), clrType),
-            Expression.Block(
-                new[] { entityVariable, tokenNameVariable, managerVariable },
-                Expression.Assign(entityVariable, Expression.New(clrType.GetConstructor(Type.EmptyTypes)!)),
-                Expression.Assign(managerVariable,
-                    Expression.New(
-                        typeof(Utf8JsonReaderManager).GetConstructor(new[] { typeof(JsonReaderData) })!,
-                        dataParameter)),
-                Expression.Assign(tokenNameVariable, Expression.Constant(null, typeof(string))),
-                Expression.Loop(
-                    Expression.IfThenElse(
-                        Expression.Call(managerVariable, TryReadTokenMethod, tokenNameVariable),
-                        Expression.Block(Expression.Switch(tokenNameVariable, null, null, propertyCases)),
-                        Expression.Break(readDoneLabel)),
-                    readDoneLabel),
-                Expression.Call(
-                    dataParameter,
-                    typeof(JsonReaderData).GetMethod(nameof(JsonReaderData.CaptureState))!,
-                    managerVariable),
-                entityVariable),
-            dataParameter).Compile();
-
-        JsonToEntityMaterializers[entityType] = materializer;
-        return materializer;
-    }
-
-    // Static materializer with manager: 
-    
-    public static PostMetadata MaterializePostMetadata(JsonReaderData data)
-    {
-        var manager = new Utf8JsonReaderManager(data);
-        var entity = new PostMetadata();
-        string? tokenName = null;
-        while (manager.TryReadToken(ref tokenName))
-        {
-            switch (tokenName!)
-            {
-                case "Views":
-                    entity.Views = manager.CurrentReader.GetInt32();
-                    break;
-                case "SomeInts":
-                    manager.AdvanceToFirstElement();
-                    entity.SomeInts.Add(manager.CurrentReader.GetInt32());
-                    break;
-                case "TopGeographies":
-                    data.CaptureState(ref manager);
-                    entity.TopGeographies.Add(MaterializeVisits(data));
-                    manager = new Utf8JsonReaderManager(data);
-                    break;
-                case "TopSearches":
-                    data.CaptureState(ref manager);
-                    entity.TopSearches.Add(MaterializeSearchTerm(data));
-                    manager = new Utf8JsonReaderManager(data);
-                    break;
-                case "Updates":
-                    data.CaptureState(ref manager);
-                    entity.Updates.Add(MaterializePostUpdate(data));
-                    manager = new Utf8JsonReaderManager(data);
-                    break;
-            }
-        }
-
-        return entity;
-    }
-
-    public static Visits MaterializeVisits(JsonReaderData data)
-    {
-        var manager = new Utf8JsonReaderManager(data);
-        var entity = new Visits();
-        string? tokenName = null;
-        while (manager.TryReadToken(ref tokenName))
-        {
-            switch (tokenName!)
-            {
-                case "Browsers":
-                    manager.AdvanceToFirstElement();
-                    entity.Browsers.Add(manager.CurrentReader.GetString()!);
-                    break;
-                case "Location":
-                    entity.Location = LocationJsonValueReader.FromJson(ref manager);
-                    break;
-                case "GeoJsonLocation":
-                    entity.GeoJsonLocation = GeoJsonLocationJsonValueReader2.FromJson(ref manager);
-                    break;
-                case "Count":
-                    entity.Count = manager.CurrentReader.GetInt32();
-                    break;
-            }
-        }
-        
-        data.CaptureState(ref manager);
-        return entity;
-    }
-    
-    public static SearchTerm MaterializeSearchTerm(JsonReaderData data)
-    {
-        var manager = new Utf8JsonReaderManager(data);
-        var entity = new SearchTerm();
-        string? tokenName = null;
-        while (manager.TryReadToken(ref tokenName))
-        {
-            switch (tokenName!)
-            {
-                case "Term":
-                    entity.Term = manager.CurrentReader.GetString()!;
-                    break;
-                case "Count":
-                    entity.Count = manager.CurrentReader.GetInt32();
-                    break;
-            }
-        }
-    
-        data.CaptureState(ref manager);
-        return entity;
-    }
-    
-    public static PostUpdate MaterializePostUpdate(JsonReaderData data)
-    {
-        var manager = new Utf8JsonReaderManager(data);
-        var entity = new PostUpdate();
-        string? tokenName = null;
-        while (manager.TryReadToken(ref tokenName))
-        {
-            switch (tokenName!)
-            {
-                case "PostedFrom":
-                    entity.PostedFrom = PostedFromJsonValueReader.FromJson(ref manager)!;
-                    break;
-                case "UpdatedBy":
-                    entity.UpdatedBy = manager.CurrentReader.GetString();
-                    break;
-                case "UpdatedOn":
-                    entity.UpdatedOn = UpdatedOnJsonValueReader.FromJson(ref manager)!;
-                    break;
-                case "Commits":
-                    data.CaptureState(ref manager);
-                    entity.Commits.Add(MaterializeCommit(data));
-                    manager = new Utf8JsonReaderManager(data);
-                    break;
-            }
-        }
-    
-        data.CaptureState(ref manager);
-
-        return entity;
-    }
-    
-    public static Commit MaterializeCommit(JsonReaderData data)
-    {
-        var manager = new Utf8JsonReaderManager(data);
-        var entity = new Commit();
-        string? tokenName = null;
-        while (manager.TryReadToken(ref tokenName))
-        {
-            switch (tokenName!)
-            {
-                case "Comment":
-                    entity.Comment = manager.CurrentReader.GetString()!;
-                    break;
-                case "CommittedOn":
-                    entity.CommittedOn = CommittedOnJsonValueReader.FromJson(ref manager);
-                    break;
-            }
-        }
-    
-        data.CaptureState(ref manager);
-
-        return entity;
-    }
-
-    private static readonly DateOnlyJsonValueReader CommittedOnJsonValueReader = new();
-    private static readonly IpAddressJsonValueReader PostedFromJsonValueReader = new();
-    private static readonly DateOnlyJsonValueReader UpdatedOnJsonValueReader = new();
-    private static readonly PointJsonValueReader LocationJsonValueReader = new();
-    private static readonly GeoJsonPointJsonValueReader4 GeoJsonLocationJsonValueReader2 = new();
 }
-    

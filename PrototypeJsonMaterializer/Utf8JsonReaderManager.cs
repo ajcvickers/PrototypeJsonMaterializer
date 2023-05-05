@@ -13,46 +13,15 @@ public ref struct Utf8JsonReaderManager
         CurrentReader = data.CreateReader();
     }
 
-    public void MoveNext()
+    public JsonTokenType MoveNext()
     {
         while (!CurrentReader.Read())
         {
-            Data.ReadBytes((int)CurrentReader.BytesConsumed);
-            Data.ReaderState = CurrentReader.CurrentState;
-            CurrentReader = Data.CreateReader();
+            CurrentReader = Data.ReadBytes((int)CurrentReader.BytesConsumed, CurrentReader.CurrentState);
         }
-    }
 
-    public bool TryReadToken(ref string? tokenName)
-    {
-        while (true)
-        {
-            MoveNext();
-
-            switch (CurrentReader.TokenType)
-            {
-                case JsonTokenType.EndObject:
-                    return false;
-                case JsonTokenType.PropertyName:
-                    tokenName = CurrentReader.GetString();
-                    break;
-                case JsonTokenType.StartObject:
-                case JsonTokenType.String:
-                case JsonTokenType.Number:
-                case JsonTokenType.True:
-                case JsonTokenType.False:
-                case JsonTokenType.Null:
-                    return true;
-            }
-        }
+        return CurrentReader.TokenType;
     }
     
-    public void AdvanceToFirstElement()
-    {
-        if (CurrentReader.TokenType == JsonTokenType.PropertyName)
-        {
-            string? _ = null;
-            TryReadToken(ref _);
-        }
-    }
+    public void CaptureState() => Data.CaptureState(ref this);
 }

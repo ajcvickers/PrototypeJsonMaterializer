@@ -9,6 +9,7 @@ public class JsonReaderData
     private byte[] _buffer;
     private int _positionInBuffer;
     private int _bytesAvailable;
+    private JsonReaderState _readerState;
 
     public JsonReaderData(byte[] buffer)
     {
@@ -20,18 +21,16 @@ public class JsonReaderData
     {
         _stream = stream;
         _buffer = new byte[1];
-        ReadBytes(0);
+        ReadBytes(0, default);
     }
-
-    public JsonReaderState ReaderState { get; set; }
 
     public void CaptureState(ref Utf8JsonReaderManager manager)
     {
         _positionInBuffer += (int)manager.CurrentReader.BytesConsumed;
-        ReaderState = manager.CurrentReader.CurrentState;
+        _readerState = manager.CurrentReader.CurrentState;
     }
 
-    public void ReadBytes(int bytesConsumed)
+    public Utf8JsonReader ReadBytes(int bytesConsumed, JsonReaderState state)
     {
         Debug.Assert(_stream != null);
         
@@ -56,8 +55,11 @@ public class JsonReaderData
 
         _buffer = buffer;
         _positionInBuffer = 0;
+        _readerState = state;
+
+        return CreateReader();
     }
 
     public Utf8JsonReader CreateReader() =>
-        new(_buffer.AsSpan(_positionInBuffer), isFinalBlock: _bytesAvailable != _buffer.Length, ReaderState);
+        new(_buffer.AsSpan(_positionInBuffer), isFinalBlock: _bytesAvailable != _buffer.Length, _readerState);
 }

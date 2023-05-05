@@ -44,6 +44,9 @@ public class BlogsContext : DbContext
             {
                 ownedNavigationBuilder.ToJson();
                 ownedNavigationBuilder.OwnsMany(metadata => metadata.TopSearches);
+                ownedNavigationBuilder.OwnsOne(
+                    metadata => metadata.Contact,
+                    contact => contact.OwnsOne(contactDetails => contactDetails.Address));
                 ownedNavigationBuilder.OwnsMany(metadata => metadata.TopGeographies);
                 ownedNavigationBuilder.OwnsMany(
                     metadata => metadata.Updates,
@@ -365,24 +368,17 @@ public class ContactDetails
 
 public class Address
 {
-    public Address(string street, string city, string postcode, string country)
-    {
-        Street = street;
-        City = city;
-        Postcode = postcode;
-        Country = country;
-    }
-
-    public string Street { get; set; }
-    public string City { get; set; }
-    public string Postcode { get; set; }
-    public string Country { get; set; }
+    public string Street { get; set; } = null!;
+    public string City { get; set; } = null!;
+    public string Postcode { get; set; } = null!;
+    public string Country { get; set; } = null!;
 }
 
 public class PostMetadata
 {
     public int Views { get; set; }
     public List<SearchTerm> TopSearches { get; } = new();
+    public ContactDetails? Contact { get; set; }
     public List<Visits> TopGeographies { get; } = new();
     public List<PostUpdate> Updates { get; } = new();
     public List<int> SomeInts { get; set; } = new();

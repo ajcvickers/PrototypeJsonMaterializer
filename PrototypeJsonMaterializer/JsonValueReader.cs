@@ -37,17 +37,29 @@ public sealed class GeoJsonPointJsonValueReader3 : IJsonValueReader<Point>
     {
         string? type = null;
         var coordinates = new List<double>();
-        string? tokenName = null;
-        while (manager.TryReadToken(ref tokenName))
+        var tokenType = JsonTokenType.None; 
+        while (tokenType != JsonTokenType.EndObject)
         {
-            switch (tokenName!)
+            tokenType = manager.MoveNext();
+
+            switch (tokenType)
             {
-                case "coordinates":
-                    manager.AdvanceToFirstElement();
-                    coordinates.Add(manager.CurrentReader.GetDouble());
-                    break;
-                case "type":
-                    type = manager.CurrentReader.GetString();
+                case JsonTokenType.PropertyName:
+                    if (manager.CurrentReader.ValueTextEquals("type"u8))
+                    {
+                        manager.MoveNext();
+                        type = manager.CurrentReader.GetString();
+                    }
+                    else if (manager.CurrentReader.ValueTextEquals("coordinates"u8))
+                    {
+                        manager.MoveNext();
+                        tokenType = manager.MoveNext();
+                        while (tokenType != JsonTokenType.EndArray)
+                        {
+                            coordinates.Add(manager.CurrentReader.GetDouble());
+                            tokenType = manager.MoveNext();
+                        }
+                    }
                     break;
             }
         }
